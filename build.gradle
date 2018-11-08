@@ -4,7 +4,6 @@ plugins {
 }
 
 group 'com.android.tools'
-artifacts 
 version '1.0-SNAPSHOT'
 
 sourceCompatibility = 1.8
@@ -15,8 +14,6 @@ repositories {
     maven { url "http://artifactory.intra.xiaojukeji.com/artifactory/public/" }
 }
 
-apply from: './upload.gradle'
-
 dependencies {
     testCompile group: 'junit', name: 'junit', version: '4.12'
     implementation fileTree(include: '*.jar', dir: 'src/main/libs')
@@ -24,4 +21,14 @@ dependencies {
     implementation "net.sf.jopt-simple:jopt-simple:4.9"
     implementation "com.google.guava:guava:22.0"
     implementation "org.smali:baksmali:2.2.1"
+    implementation 'io.reactivex.rxjava2:rxjava:2.2.2'
+}
+
+fatjar {
+    manifest {
+        attributes('Main-Class': 'com.android.tools.apk.analyzer.ApkAnalyzerCli')
+    }
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
 }
