@@ -16,8 +16,7 @@ repositories {
 
 dependencies {
     testCompile group: 'junit', name: 'junit', version: '4.12'
-    implementation fileTree(include: '*.jar', dir: 'src/main/libs')
-    implementation "com.google.code.gson:gson:2.3"
+    implementation fileTree(dir: 'libs', include: '*.jar')
     implementation "net.sf.jopt-simple:jopt-simple:4.9"
     implementation "com.google.guava:guava:22.0"
     implementation "org.smali:baksmali:2.2.1"
@@ -59,11 +58,14 @@ install {
 }
 
 
-//jar {
-//    manifest {
-//        attributes('Main-Class': 'com.android.tools.apk.analyzer.ApkAnalyzer')
-//    }
-//    from {
-//        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
-//    }
-//}
+jar {
+    manifest {
+        attributes('Main-Class': 'com.android.tools.apk.analyzer.ApkAnalyzer')
+    }
+    from {
+        configurations.runtimeClasspath.collect {
+            println(it)
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+}
