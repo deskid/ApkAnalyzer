@@ -1,0 +1,14 @@
+def propFile = file('./gradle.properties')
+Properties props = new Properties()
+propFile.withInputStream { stream ->
+    props.load(stream)
+}
+ext {
+    RELEASE_REPOSITORY_URL = props.RELEASE_REPOSITORY_URL.toString()
+    SNAPSHOT_REPOSITORY_URL = props.SNAPSHOT_REPOSITORY_URL.toString()
+    VERSION = props.VERSION.toString()
+    GROUP_ID = props.GROUP_ID.toString()
+    ARTIFACT_ID = props.ARTIFACT_ID.toString()
+    USERNAME = props.USERNAME.toString()
+    PASSWORD = props.PASSWORD.toString()
+}
