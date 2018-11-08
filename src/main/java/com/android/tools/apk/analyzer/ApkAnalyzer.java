@@ -36,7 +36,6 @@ import com.google.devrel.gmscore.tools.apk.arsc.*;
 import io.reactivex.Emitter;
 import io.reactivex.Observable;
 import io.reactivex.ObservableEmitter;
-import io.reactivex.ObservableOnSubscribe;
 import org.jf.dexlib2.dexbacked.DexBackedClassDef;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.xml.sax.SAXException;
@@ -65,11 +64,18 @@ public class ApkAnalyzer {
     private final AaptInvoker aaptInvoker;
     private boolean humanReadableFlag;
 
+    private Archive archive;
+
     /**
      * Constructs a new command-line processor.
      */
-    public ApkAnalyzer(@Nullable String osSdkFolder) {
+    public ApkAnalyzer(@Nullable String osSdkFolder, Path apk) {
         this.aaptInvoker = getAaptInvokerFromSdk(osSdkFolder);
+        try {
+            archive = Archives.open(apk);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public static AaptInvoker getAaptInvokerFromSdk(@Nullable String osSdkFolder) {
@@ -147,98 +153,89 @@ public class ApkAnalyzer {
         }
     }
 
-    public Observable<String> resPackages(@NonNull Path apk) {
+    public Observable<String> resPackages() {
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                byte[] resContents =
-                        Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
-                BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
-                List<Chunk> chunks = binaryRes.getChunks();
-                if (chunks.isEmpty()) {
-                    throw new IOException("no chunks");
-                }
 
-                if (!(chunks.get(0) instanceof ResourceTableChunk)) {
-                    throw new IOException("no res table chunk");
-                }
-
-                ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
-                resourceTableChunk
-                        .getPackages()
-                        .forEach(packageChunk -> emitter.onNext(packageChunk.getPackageName()));
-
-                emitter.onComplete();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            byte[] resContents =
+                    Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
+            BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
+            List<Chunk> chunks = binaryRes.getChunks();
+            if (chunks.isEmpty()) {
+                throw new IOException("no chunks");
             }
+
+            if (!(chunks.get(0) instanceof ResourceTableChunk)) {
+                throw new IOException("no res table chunk");
+            }
+
+            ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
+            resourceTableChunk
+                    .getPackages()
+                    .forEach(packageChunk -> emitter.onNext(packageChunk.getPackageName()));
+
+            emitter.onComplete();
         });
 
 
     }
 
-    public Observable<byte[]> resXml(@NonNull Path apk, @NonNull String filePath) {
+    public Observable<byte[]> resXml(@NonNull String filePath) {
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                Path path = archive.getContentRoot().resolve(filePath);
-                byte[] bytes = Files.readAllBytes(path);
-                if (!archive.isBinaryXml(path, bytes)) {
-                    throw new IOException("The supplied file is not a binary XML resource.");
-                }
-                emitter.onNext(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
-                emitter.onComplete();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+
+            Path path = archive.getContentRoot().resolve(filePath);
+            byte[] bytes = Files.readAllBytes(path);
+            if (!archive.isBinaryXml(path, bytes)) {
+                throw new IOException("The supplied file is not a binary XML resource.");
             }
+            emitter.onNext(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
+            emitter.onComplete();
+
         });
     }
 
     public Observable<String> resNames(
-            @NonNull Path apk,
             @NonNull String type,
             @NonNull String config,
             @Nullable String packageName) {
 
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                byte[] resContents =
-                        Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
-                BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
-                List<Chunk> chunks = binaryRes.getChunks();
-                if (chunks.isEmpty()) {
-                    throw new IOException("no chunks");
-                }
 
-                if (!(chunks.get(0) instanceof ResourceTableChunk)) {
-                    throw new IOException("no res table chunk");
-                }
+            byte[] resContents =
+                    Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
+            BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
+            List<Chunk> chunks = binaryRes.getChunks();
+            if (chunks.isEmpty()) {
+                throw new IOException("no chunks");
+            }
 
-                ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
-                Optional<PackageChunk> packageChunk;
-                if (packageName != null) {
-                    packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
-                } else {
-                    packageChunk = resourceTableChunk.getPackages().stream().findFirst();
-                }
-                if (!packageChunk.isPresent()) {
-                    throw new IllegalArgumentException(
-                            String.format(
-                                    "Can't find package chunk %s",
-                                    packageName == null ? "" : "(" + packageName + ")"));
-                }
-                TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
-                List<TypeChunk> typeChunks =
-                        ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
-                for (TypeChunk typeChunk : typeChunks) {
-                    if (config.equals(typeChunk.getConfiguration().toString())) {
-                        for (TypeChunk.Entry typeEntry : typeChunk.getEntries().values()) {
-                            emitter.onNext(typeEntry.key());
-                        }
-                        emitter.onComplete();
-                        return;
+            if (!(chunks.get(0) instanceof ResourceTableChunk)) {
+                throw new IOException("no res table chunk");
+            }
+
+            ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
+            Optional<PackageChunk> packageChunk;
+            if (packageName != null) {
+                packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
+            } else {
+                packageChunk = resourceTableChunk.getPackages().stream().findFirst();
+            }
+            if (!packageChunk.isPresent()) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Can't find package chunk %s",
+                                packageName == null ? "" : "(" + packageName + ")"));
+            }
+            TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
+            List<TypeChunk> typeChunks =
+                    ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
+            for (TypeChunk typeChunk : typeChunks) {
+                if (config.equals(typeChunk.getConfiguration().toString())) {
+                    for (TypeChunk.Entry typeEntry : typeChunk.getEntries().values()) {
+                        emitter.onNext(typeEntry.key());
                     }
+                    emitter.onComplete();
+                    return;
                 }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
             }
 
             throw new IllegalArgumentException(
@@ -249,179 +246,166 @@ public class ApkAnalyzer {
     }
 
     public Observable<String> resValue(
-            @NonNull Path apk,
             @NonNull String type,
             @NonNull String config,
             @NonNull String name,
             @Nullable String packageName) {
 
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                byte[] resContents =
-                        Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
-                BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
-                List<Chunk> chunks = binaryRes.getChunks();
-                if (chunks.isEmpty()) {
-                    throw new IOException("no chunks");
-                }
 
-                if (!(chunks.get(0) instanceof ResourceTableChunk)) {
-                    throw new IOException("no res table chunk");
-                }
+            byte[] resContents =
+                    Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
+            BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
+            List<Chunk> chunks = binaryRes.getChunks();
+            if (chunks.isEmpty()) {
+                throw new IOException("no chunks");
+            }
 
-                ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
-                StringPoolChunk stringPoolChunk = resourceTableChunk.getStringPool();
-                Optional<PackageChunk> packageChunk;
-                if (packageName != null) {
-                    packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
-                } else {
-                    packageChunk = resourceTableChunk.getPackages().stream().findFirst();
-                }
-                if (!packageChunk.isPresent()) {
-                    throw new IllegalArgumentException(
-                            String.format(
-                                    "Can't find package chunk %s",
-                                    packageName == null ? "" : "(" + packageName + ")"));
-                }
-                TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
-                List<TypeChunk> typeChunks =
-                        ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
-                for (TypeChunk typeChunk : typeChunks) {
-                    if (config.equals(typeChunk.getConfiguration().toString())) {
-                        for (TypeChunk.Entry typeEntry : typeChunk.getEntries().values()) {
-                            if (name.equals(typeEntry.key())) {
-                                BinaryResourceValue value = typeEntry.value();
-                                String valueString = null;
-                                if (value != null) {
-                                    valueString = formatValue(value, stringPoolChunk);
-                                } else {
-                                    Map<Integer, BinaryResourceValue> values = typeEntry.values();
-                                    if (values != null) {
-                                        valueString =
-                                                values.values()
-                                                        .stream()
-                                                        .map(v -> formatValue(v, stringPoolChunk))
-                                                        .collect(Collectors.joining(", "));
-                                    }
-                                }
-                                if (valueString != null) {
-                                    emitter.onNext(valueString);
-                                } else {
-                                    throw new IllegalArgumentException(
-                                            "Can't find specified resource value");
+            if (!(chunks.get(0) instanceof ResourceTableChunk)) {
+                throw new IOException("no res table chunk");
+            }
+
+            ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
+            StringPoolChunk stringPoolChunk = resourceTableChunk.getStringPool();
+            Optional<PackageChunk> packageChunk;
+            if (packageName != null) {
+                packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
+            } else {
+                packageChunk = resourceTableChunk.getPackages().stream().findFirst();
+            }
+            if (!packageChunk.isPresent()) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Can't find package chunk %s",
+                                packageName == null ? "" : "(" + packageName + ")"));
+            }
+            TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
+            List<TypeChunk> typeChunks =
+                    ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
+            for (TypeChunk typeChunk : typeChunks) {
+                if (config.equals(typeChunk.getConfiguration().toString())) {
+                    for (TypeChunk.Entry typeEntry : typeChunk.getEntries().values()) {
+                        if (name.equals(typeEntry.key())) {
+                            BinaryResourceValue value = typeEntry.value();
+                            String valueString = null;
+                            if (value != null) {
+                                valueString = formatValue(value, stringPoolChunk);
+                            } else {
+                                Map<Integer, BinaryResourceValue> values = typeEntry.values();
+                                if (values != null) {
+                                    valueString =
+                                            values.values()
+                                                    .stream()
+                                                    .map(v -> formatValue(v, stringPoolChunk))
+                                                    .collect(Collectors.joining(", "));
                                 }
                             }
+                            if (valueString != null) {
+                                emitter.onNext(valueString);
+                            } else {
+                                throw new IllegalArgumentException(
+                                        "Can't find specified resource value");
+                            }
                         }
-                        emitter.onComplete();
-                        return;
                     }
+                    emitter.onComplete();
+                    return;
                 }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
             }
             throw new IllegalArgumentException(
                     String.format("Can't find specified resource configuration (%s)", config));
         });
     }
 
-    public Observable<String> resConfigs(@NonNull Path apk, @NonNull String type, @Nullable String packageName) {
+    public Observable<String> resConfigs(@NonNull String type, @Nullable String packageName) {
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                byte[] resContents =
-                        Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
-                BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
-                List<Chunk> chunks = binaryRes.getChunks();
-                if (chunks.isEmpty()) {
-                    throw new IOException("no chunks");
-                }
 
-                if (!(chunks.get(0) instanceof ResourceTableChunk)) {
-                    throw new IOException("no res table chunk");
-                }
-
-                ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
-                Optional<PackageChunk> packageChunk;
-                if (packageName != null) {
-                    packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
-                } else {
-                    packageChunk = resourceTableChunk.getPackages().stream().findFirst();
-                }
-                if (!packageChunk.isPresent()) {
-                    throw new IllegalArgumentException(
-                            String.format(
-                                    "Can't find package chunk %s",
-                                    packageName == null ? "" : "(" + packageName + ")"));
-                }
-                TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
-                List<TypeChunk> typeChunks =
-                        ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
-                for (TypeChunk typeChunk : typeChunks) {
-                    emitter.onNext(typeChunk.getConfiguration().toString());
-                }
-                emitter.onComplete();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            byte[] resContents =
+                    Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
+            BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
+            List<Chunk> chunks = binaryRes.getChunks();
+            if (chunks.isEmpty()) {
+                throw new IOException("no chunks");
             }
+
+            if (!(chunks.get(0) instanceof ResourceTableChunk)) {
+                throw new IOException("no res table chunk");
+            }
+
+            ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
+            Optional<PackageChunk> packageChunk;
+            if (packageName != null) {
+                packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
+            } else {
+                packageChunk = resourceTableChunk.getPackages().stream().findFirst();
+            }
+            if (!packageChunk.isPresent()) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Can't find package chunk %s",
+                                packageName == null ? "" : "(" + packageName + ")"));
+            }
+            TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
+            List<TypeChunk> typeChunks =
+                    ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
+            for (TypeChunk typeChunk : typeChunks) {
+                emitter.onNext(typeChunk.getConfiguration().toString());
+            }
+            emitter.onComplete();
+
         });
-
-
     }
 
-    public Observable<String> dexCode(@NonNull Path apk, @NonNull String fqcn, @Nullable final String method) {
+    public Observable<String> dexCode(@NonNull String fqcn, @Nullable final String method) {
         return Observable.create(emitter -> {
             String newMethod = method;
-            try (Archive archive = Archives.open(apk)) {
-                Collection<Path> dexPaths = getDexFilesFrom(archive.getContentRoot());
+            Collection<Path> dexPaths = getDexFilesFrom(archive.getContentRoot());
 
-                boolean dexFound = false;
-                for (Path dexPath : dexPaths) {
-                    DexBackedDexFile dexBackedDexFile = DexFiles.getDexFile(dexPath);
-                    DexDisassembler disassembler = new DexDisassembler(dexBackedDexFile);
-                    if (method == null) {
-                        try {
-                            emitter.onNext(disassembler.disassembleClass(fqcn));
-                            dexFound = true;
-                        } catch (IllegalStateException e) {
-                            //this dex file doesn't contain the given class.
-                            //continue searching
-                        }
-                    } else {
-                        Optional<? extends DexBackedClassDef> classDef =
-                                dexBackedDexFile
-                                        .getClasses()
-                                        .stream()
-                                        .filter(c -> fqcn.equals(SigUtils.signatureToName(c.getType())))
-                                        .findFirst();
-                        if (classDef.isPresent()) {
-                            newMethod = classDef.get().getType() + "->" + method;
-                        }
-                        try {
-                            emitter.onNext(disassembler.disassembleMethod(fqcn, newMethod));
-                            dexFound = true;
-                        } catch (IllegalStateException e) {
-                            //this dex file doesn't contain the given method.
-                            //continue searching
-                        }
+            boolean dexFound = false;
+            for (Path dexPath : dexPaths) {
+                DexBackedDexFile dexBackedDexFile = DexFiles.getDexFile(dexPath);
+                DexDisassembler disassembler = new DexDisassembler(dexBackedDexFile);
+                if (method == null) {
+                    try {
+                        emitter.onNext(disassembler.disassembleClass(fqcn));
+                        dexFound = true;
+                    } catch (IllegalStateException e) {
+                        //this dex file doesn't contain the given class.
+                        //continue searching
+                    }
+                } else {
+                    Optional<? extends DexBackedClassDef> classDef =
+                            dexBackedDexFile
+                                    .getClasses()
+                                    .stream()
+                                    .filter(c -> fqcn.equals(SigUtils.signatureToName(c.getType())))
+                                    .findFirst();
+                    if (classDef.isPresent()) {
+                        newMethod = classDef.get().getType() + "->" + method;
+                    }
+                    try {
+                        emitter.onNext(disassembler.disassembleMethod(fqcn, newMethod));
+                        dexFound = true;
+                    } catch (IllegalStateException e) {
+                        //this dex file doesn't contain the given method.
+                        //continue searching
                     }
                 }
-                if (!dexFound) {
-                    if (newMethod == null) {
-                        throw new IllegalArgumentException(
-                                String.format("The given class (%s) not found", fqcn));
-                    } else {
-                        throw new IllegalArgumentException(
-                                String.format(
-                                        "The given class (%s) or method (%s) not found", fqcn, newMethod));
-                    }
+            }
+            if (!dexFound) {
+                if (newMethod == null) {
+                    throw new IllegalArgumentException(
+                            String.format("The given class (%s) not found", fqcn));
+                } else {
+                    throw new IllegalArgumentException(
+                            String.format(
+                                    "The given class (%s) or method (%s) not found", fqcn, newMethod));
                 }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
             }
         });
     }
 
     public Observable<String> dexPackages(
-            @NonNull Path apk,
             @Nullable Path proguardFolderPath,
             @Nullable Path proguardMapFilePath,
             @Nullable Path proguardSeedsFilePath,
@@ -506,38 +490,34 @@ public class ApkAnalyzer {
             ProguardMappings proguardMappings = new ProguardMappings(proguardMap, seeds, usage);
             boolean deobfuscateNames = proguardMap != null;
 
-            try (Archive archive = Archives.open(apk)) {
-                Collection<Path> dexPaths;
-                if (dexFilePaths == null || dexFilePaths.isEmpty()) {
-                    dexPaths = getDexFilesFrom(archive.getContentRoot());
-                } else {
-                    dexPaths =
-                            dexFilePaths
-                                    .stream()
-                                    .map(dexFile -> archive.getContentRoot().resolve(dexFile))
-                                    .collect(Collectors.toList());
-                }
-                Map<Path, DexBackedDexFile> dexFiles = Maps.newHashMapWithExpectedSize(dexPaths.size());
-                for (Path dexPath : dexPaths) {
-                    dexFiles.put(dexPath, DexFiles.getDexFile(dexPath));
-                }
-
-                PackageTreeCreator treeCreator =
-                        new PackageTreeCreator(proguardMappings, deobfuscateNames);
-                DexPackageNode rootNode = treeCreator.constructPackageTree(dexFiles);
-
-                DexViewFilters filters = new DexViewFilters();
-                filters.setShowFields(true);
-                filters.setShowMethods(true);
-                filters.setShowReferencedNodes(!showDefinedOnly);
-                filters.setShowRemovedNodes(showRemoved);
-
-                FilteredTreeModel<DexElementNode> model = new FilteredTreeModel<>(rootNode, filters);
-                dumpTree(emitter, model, rootNode, proguardMappings.seeds, proguardMappings.map);
-                emitter.onComplete();
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            Collection<Path> dexPaths;
+            if (dexFilePaths == null || dexFilePaths.isEmpty()) {
+                dexPaths = getDexFilesFrom(archive.getContentRoot());
+            } else {
+                dexPaths =
+                        dexFilePaths
+                                .stream()
+                                .map(dexFile -> archive.getContentRoot().resolve(dexFile))
+                                .collect(Collectors.toList());
             }
+            Map<Path, DexBackedDexFile> dexFiles = Maps.newHashMapWithExpectedSize(dexPaths.size());
+            for (Path dexPath : dexPaths) {
+                dexFiles.put(dexPath, DexFiles.getDexFile(dexPath));
+            }
+
+            PackageTreeCreator treeCreator =
+                    new PackageTreeCreator(proguardMappings, deobfuscateNames);
+            DexPackageNode rootNode = treeCreator.constructPackageTree(dexFiles);
+
+            DexViewFilters filters = new DexViewFilters();
+            filters.setShowFields(true);
+            filters.setShowMethods(true);
+            filters.setShowReferencedNodes(!showDefinedOnly);
+            filters.setShowRemovedNodes(showRemoved);
+
+            FilteredTreeModel<DexElementNode> model = new FilteredTreeModel<>(rootNode, filters);
+            dumpTree(emitter, model, rootNode, proguardMappings.seeds, proguardMappings.map);
+            emitter.onComplete();
         });
 
 
@@ -608,46 +588,37 @@ public class ApkAnalyzer {
         }
     }
 
-    public Observable<String> dexReferences(@NonNull Path apk, @Nullable List<String> dexFilePaths) {
+    public Observable<String> dexReferences(@Nullable List<String> dexFilePaths) {
         return Observable.create(emitter -> {
-            try (Archive archive = Archives.open(apk)) {
-                Collection<Path> dexPaths;
-                if (dexFilePaths == null || dexFilePaths.isEmpty()) {
-                    dexPaths = getDexFilesFrom(archive.getContentRoot());
-                } else {
-                    dexPaths =
-                            dexFilePaths
-                                    .stream()
-                                    .map(dexFile -> archive.getContentRoot().resolve(dexFile))
-                                    .collect(Collectors.toList());
-                }
-                for (Path dexPath : dexPaths) {
-                    DexFileStats stats =
-                            DexFileStats.create(Collections.singleton(DexFiles.getDexFile(dexPath)));
-                    emitter.onNext(String.format("%s\t%d", dexPath.getFileName().toString(), stats.referencedMethodCount));
-                    emitter.onComplete();
-                }
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
+            Collection<Path> dexPaths;
+            if (dexFilePaths == null || dexFilePaths.isEmpty()) {
+                dexPaths = getDexFilesFrom(archive.getContentRoot());
+            } else {
+                dexPaths =
+                        dexFilePaths
+                                .stream()
+                                .map(dexFile -> archive.getContentRoot().resolve(dexFile))
+                                .collect(Collectors.toList());
+            }
+            for (Path dexPath : dexPaths) {
+                DexFileStats stats =
+                        DexFileStats.create(Collections.singleton(DexFiles.getDexFile(dexPath)));
+                emitter.onNext(String.format("%s\t%d", dexPath.getFileName().toString(), stats.referencedMethodCount));
+                emitter.onComplete();
             }
         });
 
 
     }
 
-    public Observable<String> dexList(@NonNull Path apk) {
-        return Observable.create(new ObservableOnSubscribe<String>() {
-            @Override
-            public void subscribe(ObservableEmitter<String> emitter) throws Exception {
-                try (Archive archive = Archives.open(apk)) {
-                    getDexFilesFrom(archive.getContentRoot()).stream()
-                            .map(path -> path.getFileName().toString())
-                            .forEachOrdered(emitter::onNext);
-                    emitter.onComplete();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            }
+    public Observable<String> dexList() {
+        return Observable.create(emitter -> {
+
+            getDexFilesFrom(archive.getContentRoot()).stream()
+                    .map(path -> path.getFileName().toString())
+                    .forEachOrdered(emitter::onNext);
+            emitter.onComplete();
+
         });
     }
 
@@ -661,8 +632,8 @@ public class ApkAnalyzer {
         return AndroidManifestParser.parse(new ByteArrayInputStream(manifestBytes));
     }
 
-    public boolean manifestDebuggable(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public boolean manifestDebuggable() {
+        try {
             ManifestData manifestData = getManifestData(archive);
             boolean debuggable =
                     manifestData.getDebuggable() != null ? manifestData.getDebuggable() : false;
@@ -675,27 +646,24 @@ public class ApkAnalyzer {
     }
 
     public Observable<String> manifestPermissions(@NonNull Path apk) {
-        return Observable.create(new ObservableOnSubscribe<String>() {
-            @Override
-            public void subscribe(ObservableEmitter<String> emitter) throws Exception {
-                List<String> output;
-                try {
-                    output = aaptInvoker.dumpBadging(apk.toFile());
-                } catch (ProcessException e) {
-                    throw new RuntimeException(e);
-                }
-                AndroidApplicationInfo apkInfo = AndroidApplicationInfo.parseBadging(output);
-                for (String name : apkInfo.getPermissions()) {
-                    emitter.onNext(name);
-                }
-                emitter.onComplete();
+        return Observable.create(emitter -> {
+            List<String> output;
+            try {
+                output = aaptInvoker.dumpBadging(apk.toFile());
+            } catch (ProcessException e) {
+                throw new RuntimeException(e);
             }
+            AndroidApplicationInfo apkInfo = AndroidApplicationInfo.parseBadging(output);
+            for (String name : apkInfo.getPermissions()) {
+                emitter.onNext(name);
+            }
+            emitter.onComplete();
         });
 
     }
 
-    public String manifestTargetSdk(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public String manifestTargetSdk() {
+        try {
             ManifestData manifestData = getManifestData(archive);
             return String.valueOf(manifestData.getTargetSdkVersion());
         } catch (SAXException | ParserConfigurationException e) {
@@ -705,8 +673,8 @@ public class ApkAnalyzer {
         }
     }
 
-    public String manifestMinSdk(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public String manifestMinSdk() {
+        try {
             ManifestData manifestData = getManifestData(archive);
             return
                     manifestData.getMinSdkVersion() != ManifestData.MIN_SDK_CODENAME
@@ -719,8 +687,8 @@ public class ApkAnalyzer {
         }
     }
 
-    public String manifestVersionCode(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public String manifestVersionCode() {
+        try {
             ManifestData manifestData = getManifestData(archive);
             return String.format("%d", manifestData.getVersionCode());
         } catch (SAXException | ParserConfigurationException e) {
@@ -741,8 +709,8 @@ public class ApkAnalyzer {
         return apkInfo.versionName;
     }
 
-    public String manifestAppId(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public String manifestAppId() {
+        try {
             ManifestData manifestData = getManifestData(archive);
             return manifestData.getPackage();
         } catch (SAXException | ParserConfigurationException e) {
@@ -752,8 +720,8 @@ public class ApkAnalyzer {
         }
     }
 
-    public String manifestPrint(@NonNull Path apk) {
-        try (Archive archive = Archives.open(apk)) {
+    public String manifestPrint() {
+        try {
             Path path = archive.getContentRoot().resolve(SdkConstants.ANDROID_MANIFEST_XML);
             byte[] bytes = Files.readAllBytes(path);
             return new String(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
@@ -778,24 +746,21 @@ public class ApkAnalyzer {
             boolean patchSize,
             boolean showFilesOnly,
             boolean showDifferentOnly) {
-        return Observable.create(new ObservableOnSubscribe<ApkDiffEntry>() {
-            @Override
-            public void subscribe(ObservableEmitter<ApkDiffEntry> emitter) throws Exception {
-                try (Archive oldApk = Archives.open(oldApkFile);
-                     Archive newApk = Archives.open(newApkFile)) {
-                    DefaultMutableTreeNode node;
-                    if (patchSize) {
-                        node = ApkFileByFileDiffParser.createTreeNode(oldApk, newApk);
-                    } else {
-                        node = ApkDiffParser.createTreeNode(oldApk, newApk);
-                    }
-                    dumpCompare(emitter, node, "", !showFilesOnly, showDifferentOnly);
-                    emitter.onComplete();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                } catch (InterruptedException e) {
-                    throw new RuntimeException(e);
+        return Observable.create(emitter -> {
+            try (Archive oldApk = Archives.open(oldApkFile);
+                 Archive newApk = Archives.open(newApkFile)) {
+                DefaultMutableTreeNode node;
+                if (patchSize) {
+                    node = ApkFileByFileDiffParser.createTreeNode(oldApk, newApk);
+                } else {
+                    node = ApkDiffParser.createTreeNode(oldApk, newApk);
                 }
+                dumpCompare(emitter, node, "", !showFilesOnly, showDifferentOnly);
+                emitter.onComplete();
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
             }
         });
 
@@ -843,45 +808,37 @@ public class ApkAnalyzer {
     }
 
     public Observable<String> filesList(
-            @NonNull Path apk,
             boolean showRawSize,
             boolean showDownloadSize,
             boolean showFilesOnly) {
 
-        return Observable.create(new ObservableOnSubscribe<String>() {
+        return Observable.create(emitter -> {
 
-            @Override
-            public void subscribe(ObservableEmitter<String> emitter) throws Exception {
-                try (Archive archive = Archives.open(apk)) {
-                    ArchiveNode node = ArchiveTreeStructure.create(archive);
-                    if (showRawSize) {
-                        ArchiveTreeStructure.updateRawFileSizes(node, ApkSizeCalculator.getDefault());
-                    }
-                    if (showDownloadSize) {
-                        ArchiveTreeStructure.updateDownloadFileSizes(node, ApkSizeCalculator.getDefault());
-                    }
-                    ArchiveTreeStream.preOrderStream(node)
-                            .map(
-                                    n -> {
-                                        String path = n.getData().getFullPathString();
-                                        long rawSize = n.getData().getRawFileSize();
-                                        long downloadSize = n.getData().getDownloadFileSize();
-
-                                        if (showDownloadSize) {
-                                            path = getSize(downloadSize) + "\t" + path;
-                                        }
-                                        if (showRawSize) {
-                                            path = getSize(rawSize) + "\t" + path;
-                                        }
-                                        return path;
-                                    })
-                            .filter(path -> !showFilesOnly || !path.endsWith("/"))
-                            .forEachOrdered(emitter::onNext);
-                    emitter.onComplete();
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
+            ArchiveNode node = ArchiveTreeStructure.create(archive);
+            if (showRawSize) {
+                ArchiveTreeStructure.updateRawFileSizes(node, ApkSizeCalculator.getDefault());
             }
+            if (showDownloadSize) {
+                ArchiveTreeStructure.updateDownloadFileSizes(node, ApkSizeCalculator.getDefault());
+            }
+            ArchiveTreeStream.preOrderStream(node)
+                    .map(
+                            n -> {
+                                String path = n.getData().getFullPathString();
+                                long rawSize = n.getData().getRawFileSize();
+                                long downloadSize = n.getData().getDownloadFileSize();
+
+                                if (showDownloadSize) {
+                                    path = getSize(downloadSize) + "\t" + path;
+                                }
+                                if (showRawSize) {
+                                    path = getSize(rawSize) + "\t" + path;
+                                }
+                                return path;
+                            })
+                    .filter(path -> !showFilesOnly || !path.endsWith("/"))
+                    .forEachOrdered(emitter::onNext);
+            emitter.onComplete();
         });
 
 
