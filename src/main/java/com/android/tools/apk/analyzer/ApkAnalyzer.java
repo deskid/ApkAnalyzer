@@ -22,18 +22,16 @@ import com.android.ide.common.process.ProcessException;
 import com.android.ide.common.xml.AndroidManifestParser;
 import com.android.ide.common.xml.ManifestData;
 import com.android.sdklib.repository.AndroidSdkHandler;
-import com.android.tools.apk.analyzer.dex.*;
-import com.android.tools.apk.analyzer.dex.tree.*;
-import com.android.tools.apk.analyzer.internal.*;
-import com.android.tools.proguard.ProguardMap;
-import com.android.tools.proguard.ProguardSeedsMap;
-import com.android.tools.proguard.ProguardUsagesMap;
+import com.android.tools.apk.analyzer.dex.DexDisassembler;
+import com.android.tools.apk.analyzer.dex.DexFileStats;
+import com.android.tools.apk.analyzer.dex.DexFiles;
+import com.android.tools.apk.analyzer.internal.ApkDiffEntry;
+import com.android.tools.apk.analyzer.internal.ApkDiffParser;
+import com.android.tools.apk.analyzer.internal.ApkFileByFileDiffParser;
+import com.android.tools.apk.analyzer.internal.SigUtils;
 import com.android.utils.NullLogger;
-import com.google.common.base.Charsets;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Maps;
 import com.google.devrel.gmscore.tools.apk.arsc.*;
-import io.reactivex.Emitter;
 import io.reactivex.Observable;
 import io.reactivex.ObservableEmitter;
 import org.jf.dexlib2.dexbacked.DexBackedClassDef;
@@ -41,13 +39,14 @@ import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.xml.sax.SAXException;
 
 import javax.swing.tree.DefaultMutableTreeNode;
-import javax.swing.tree.TreeModel;
 import javax.xml.parsers.ParserConfigurationException;
-import java.io.*;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.DecimalFormat;
-import java.text.ParseException;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -63,6 +62,7 @@ public class ApkAnalyzer {
     @NonNull
     private final AaptInvoker aaptInvoker;
     private boolean humanReadableFlag;
+    private Path apkPath;
 
     private Archive archive;
 
@@ -70,12 +70,13 @@ public class ApkAnalyzer {
         this.aaptInvoker = getAaptInvokerFromSdk(osSdkFolder);
         try {
             archive = Archives.open(apk);
+            apkPath = apk;
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    public static AaptInvoker getAaptInvokerFromSdk(@Nullable String osSdkFolder) {
+    private static AaptInvoker getAaptInvokerFromSdk(@Nullable String osSdkFolder) {
         if (osSdkFolder == null) {
             // We get passed a property for the tools dir
             String toolsDirProp = System.getProperty(TOOLSDIR);
@@ -150,8 +151,8 @@ public class ApkAnalyzer {
         }
     }
 
-    public static int getResId(int packId, int resTypeId, int entryid) {
-        return (((packId) << 24) | (((resTypeId) & 0xFF) << 16) | (entryid & 0xFFFF));
+    private static int getResId(int packId, int resTypeId, int entryId) {
+        return (((packId) << 24) | (((resTypeId) & 0xFF) << 16) | (entryId & 0xFFFF));
     }
 
     public static void main(String[] args) {
@@ -164,6 +165,11 @@ public class ApkAnalyzer {
         apkAnalyzer.resValue("string", "default", resName, null).subscribe(System.out::println);
     }
 
+    /**
+     * close the archive
+     *
+     * @throws IOException
+     */
     public void close() throws IOException {
         archive.close();
     }
@@ -192,18 +198,13 @@ public class ApkAnalyzer {
         });
     }
 
-    public Observable<byte[]> resXml(@NonNull String filePath) {
-        return Observable.create(emitter -> {
-
-            Path path = archive.getContentRoot().resolve(filePath);
-            byte[] bytes = Files.readAllBytes(path);
-            if (!archive.isBinaryXml(path, bytes)) {
-                throw new IOException("The supplied file is not a binary XML resource.");
-            }
-            emitter.onNext(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
-            emitter.onComplete();
-
-        });
+    public String resXml(@NonNull String filePath) throws IOException {
+        Path path = archive.getContentRoot().resolve(filePath);
+        byte[] bytes = Files.readAllBytes(path);
+        if (!archive.isBinaryXml(path, bytes)) {
+            throw new IOException("The supplied file is not a binary XML resource.");
+        }
+        return new String(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
     }
 
     public Observable<String> resNames(
@@ -474,190 +475,7 @@ public class ApkAnalyzer {
         });
     }
 
-    public Observable<String> dexPackages(
-            @Nullable Path proguardFolderPath,
-            @Nullable Path proguardMapFilePath,
-            @Nullable Path proguardSeedsFilePath,
-            @Nullable Path proguardUsagesFilePath,
-            boolean showDefinedOnly,
-            boolean showRemoved,
-            @Nullable List<String> dexFilePaths) {
-
-        return Observable.create(emitter -> {
-            ProguardMappingFiles pfm;
-            if (proguardFolderPath != null) {
-                try {
-                    pfm = ProguardMappingFiles.from(new Path[]{proguardFolderPath});
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            } else {
-                pfm =
-                        new ProguardMappingFiles(
-                                proguardMapFilePath != null ? proguardMapFilePath : null,
-                                proguardSeedsFilePath != null ? proguardSeedsFilePath : null,
-                                proguardUsagesFilePath != null ? proguardUsagesFilePath : null);
-            }
-
-            List<String> loaded = new ArrayList<>(3);
-            List<String> errors = new ArrayList<>(3);
-
-            ProguardMap proguardMap = null;
-            if (pfm.mappingFile != null) {
-                proguardMap = new ProguardMap();
-                try {
-                    proguardMap.readFromReader(
-                            new InputStreamReader(
-                                    Files.newInputStream(pfm.mappingFile), Charsets.UTF_8));
-                    loaded.add(pfm.mappingFile.getFileName().toString());
-                } catch (IOException | ParseException e) {
-                    errors.add(pfm.mappingFile.getFileName().toString());
-                    proguardMap = null;
-                }
-            }
-            ProguardSeedsMap seeds = null;
-            if (pfm.seedsFile != null) {
-                try {
-                    seeds =
-                            ProguardSeedsMap.parse(
-                                    new InputStreamReader(
-                                            Files.newInputStream(pfm.seedsFile), Charsets.UTF_8));
-                    loaded.add(pfm.seedsFile.getFileName().toString());
-                } catch (IOException e) {
-                    errors.add(pfm.seedsFile.getFileName().toString());
-                }
-            }
-            ProguardUsagesMap usage = null;
-            if (pfm.usageFile != null) {
-                try {
-                    usage =
-                            ProguardUsagesMap.parse(
-                                    new InputStreamReader(
-                                            Files.newInputStream(pfm.usageFile), Charsets.UTF_8));
-                    loaded.add(pfm.usageFile.getFileName().toString());
-                } catch (IOException e) {
-                    errors.add(pfm.usageFile.getFileName().toString());
-                }
-            }
-
-            if (!errors.isEmpty() && loaded.isEmpty()) {
-                System.err.println(
-                        "No Proguard mapping files found. The filenames must match one of: mapping.txt, seeds.txt, usage.txt");
-            } else if (errors.isEmpty() && !loaded.isEmpty()) {
-                System.err.println(
-                        "Successfully loaded maps from: "
-                                + loaded.stream().collect(Collectors.joining(", ")));
-            } else if (!errors.isEmpty() && !loaded.isEmpty()) {
-                System.err.println(
-                        "Successfully loaded maps from: "
-                                + loaded.stream().collect(Collectors.joining(", "))
-                                + "\n"
-                                + "There were problems loading: "
-                                + errors.stream().collect(Collectors.joining(", ")));
-            }
-
-            ProguardMappings proguardMappings = new ProguardMappings(proguardMap, seeds, usage);
-            boolean deobfuscateNames = proguardMap != null;
-
-            Collection<Path> dexPaths;
-            if (dexFilePaths == null || dexFilePaths.isEmpty()) {
-                dexPaths = getDexFilesFrom(archive.getContentRoot());
-            } else {
-                dexPaths =
-                        dexFilePaths
-                                .stream()
-                                .map(dexFile -> archive.getContentRoot().resolve(dexFile))
-                                .collect(Collectors.toList());
-            }
-            Map<Path, DexBackedDexFile> dexFiles = Maps.newHashMapWithExpectedSize(dexPaths.size());
-            for (Path dexPath : dexPaths) {
-                dexFiles.put(dexPath, DexFiles.getDexFile(dexPath));
-            }
-
-            PackageTreeCreator treeCreator =
-                    new PackageTreeCreator(proguardMappings, deobfuscateNames);
-            DexPackageNode rootNode = treeCreator.constructPackageTree(dexFiles);
-
-            DexViewFilters filters = new DexViewFilters();
-            filters.setShowFields(true);
-            filters.setShowMethods(true);
-            filters.setShowReferencedNodes(!showDefinedOnly);
-            filters.setShowRemovedNodes(showRemoved);
-
-            FilteredTreeModel<DexElementNode> model = new FilteredTreeModel<>(rootNode, filters);
-            dumpTree(emitter, model, rootNode, proguardMappings.seeds, proguardMappings.map);
-            emitter.onComplete();
-        });
-
-
-    }
-
-    private void dumpTree(Emitter<String> emitter,
-                          @NonNull TreeModel model,
-                          @NonNull DexElementNode node,
-                          ProguardSeedsMap seeds,
-                          ProguardMap map) {
-        StringBuilder sb = new StringBuilder();
-
-        if (node instanceof DexClassNode) {
-            sb.append("C ");
-        } else if (node instanceof DexPackageNode) {
-            sb.append("P ");
-        } else if (node instanceof DexMethodNode) {
-            sb.append("M ");
-        } else if (node instanceof DexFieldNode) {
-            sb.append("F ");
-        }
-
-        if (node.isRemoved()) {
-            sb.append("x ");
-        } else if (node.isSeed(seeds, map, true)) {
-            sb.append("k ");
-        } else if (!node.isDefined()) {
-            sb.append("r ");
-        } else {
-            sb.append("d ");
-        }
-
-        sb.append(node.getMethodDefinitionsCount());
-        sb.append('\t');
-        sb.append(node.getMethodReferencesCount());
-        sb.append('\t');
-        sb.append(getSize(node.getSize()));
-        sb.append('\t');
-
-        if (node instanceof DexPackageNode) {
-            if (node.getParent() == null) {
-                sb.append("<TOTAL>");
-            } else {
-                sb.append(((DexPackageNode) node).getPackageName());
-            }
-        } else if (node instanceof DexClassNode) {
-            DexPackageNode parent = (DexPackageNode) node.getParent();
-            if (parent != null && parent.getPackageName() != null) {
-                sb.append(parent.getPackageName());
-                sb.append(".");
-            }
-            sb.append(node.getName());
-        } else if (node instanceof DexMethodNode | node instanceof DexFieldNode) {
-            DexPackageNode parent = (DexPackageNode) node.getParent().getParent();
-            if (parent != null && parent.getPackageName() != null) {
-                sb.append(parent.getPackageName());
-                sb.append(".");
-            }
-            sb.append(node.getParent().getName());
-            sb.append(" ");
-            sb.append(node.getName());
-        }
-
-        emitter.onNext(sb.toString());
-
-        for (int i = 0; i < model.getChildCount(node); i++) {
-            dumpTree(emitter, model, (DexElementNode) model.getChild(node, i), seeds, map);
-        }
-    }
-
-    public Observable<String> dexReferences(@Nullable List<String> dexFilePaths) {
+    public Observable<Integer> dexReferences(@Nullable List<String> dexFilePaths) {
         return Observable.create(emitter -> {
             Collection<Path> dexPaths;
             if (dexFilePaths == null || dexFilePaths.isEmpty()) {
@@ -672,7 +490,7 @@ public class ApkAnalyzer {
             for (Path dexPath : dexPaths) {
                 DexFileStats stats =
                         DexFileStats.create(Collections.singleton(DexFiles.getDexFile(dexPath)));
-                emitter.onNext(String.format("%s\t%d", dexPath.getFileName().toString(), stats.referencedMethodCount));
+                emitter.onNext(stats.referencedMethodCount);
                 emitter.onComplete();
             }
         });
@@ -704,9 +522,7 @@ public class ApkAnalyzer {
     public boolean manifestDebuggable() {
         try {
             ManifestData manifestData = getManifestData(archive);
-            boolean debuggable =
-                    manifestData.getDebuggable() != null ? manifestData.getDebuggable() : false;
-            return debuggable;
+            return manifestData.getDebuggable() != null ? manifestData.getDebuggable() : false;
         } catch (SAXException | ParserConfigurationException e) {
             throw new RuntimeException(e);
         } catch (IOException e) {
@@ -714,11 +530,11 @@ public class ApkAnalyzer {
         }
     }
 
-    public Observable<String> manifestPermissions(@NonNull Path apk) {
+    public Observable<String> manifestPermissions() {
         return Observable.create(emitter -> {
             List<String> output;
             try {
-                output = aaptInvoker.dumpBadging(apk.toFile());
+                output = aaptInvoker.dumpBadging(apkPath.toFile());
             } catch (ProcessException e) {
                 throw new RuntimeException(e);
             }
@@ -767,10 +583,10 @@ public class ApkAnalyzer {
         }
     }
 
-    public String manifestVersionName(@NonNull Path apk) {
+    public String manifestVersionName() {
         List<String> xml;
         try {
-            xml = aaptInvoker.dumpBadging(apk.toFile());
+            xml = aaptInvoker.dumpBadging(apkPath.toFile());
         } catch (ProcessException e) {
             throw new RuntimeException(e);
         }
@@ -799,30 +615,28 @@ public class ApkAnalyzer {
         }
     }
 
-    public String apkDownloadSize(@NonNull Path apk) {
+    public String apkDownloadSize() {
         ApkSizeCalculator sizeCalculator = ApkSizeCalculator.getDefault();
-        return getSize(sizeCalculator.getFullApkDownloadSize(apk));
+        return getSize(sizeCalculator.getFullApkDownloadSize(apkPath));
     }
 
-    public String apkRawSize(@NonNull Path apk) {
+    public String apkRawSize() {
         ApkSizeCalculator sizeCalculator = ApkSizeCalculator.getDefault();
-        return getSize(sizeCalculator.getFullApkRawSize(apk));
+        return getSize(sizeCalculator.getFullApkRawSize(apkPath));
     }
 
     public Observable<ApkDiffEntry> apkCompare(
-            @NonNull Path oldApkFile,
             @NonNull Path newApkFile,
             boolean patchSize,
             boolean showFilesOnly,
             boolean showDifferentOnly) {
         return Observable.create(emitter -> {
-            try (Archive oldApk = Archives.open(oldApkFile);
-                 Archive newApk = Archives.open(newApkFile)) {
+            try (Archive newApk = Archives.open(newApkFile)) {
                 DefaultMutableTreeNode node;
                 if (patchSize) {
-                    node = ApkFileByFileDiffParser.createTreeNode(oldApk, newApk);
+                    node = ApkFileByFileDiffParser.createTreeNode(archive, newApk);
                 } else {
-                    node = ApkDiffParser.createTreeNode(oldApk, newApk);
+                    node = ApkDiffParser.createTreeNode(archive, newApk);
                 }
                 dumpCompare(emitter, node, "", !showFilesOnly, showDifferentOnly);
                 emitter.onComplete();
@@ -865,10 +679,10 @@ public class ApkAnalyzer {
     }
 
 
-    public AndroidApplicationInfo apkSummary(@NonNull Path apk) {
+    public AndroidApplicationInfo apkSummary() {
         List<String> output;
         try {
-            output = aaptInvoker.dumpBadging(apk.toFile());
+            output = aaptInvoker.dumpBadging(apkPath.toFile());
         } catch (ProcessException e) {
             throw new RuntimeException(e);
         }
@@ -876,10 +690,9 @@ public class ApkAnalyzer {
         return apkInfo;
     }
 
-    public Observable<String> filesList(
+    public Observable<ArchiveEntry> filesList(
             boolean showRawSize,
-            boolean showDownloadSize,
-            boolean showFilesOnly) {
+            boolean showDownloadSize) {
 
         return Observable.create(emitter -> {
 
@@ -891,21 +704,7 @@ public class ApkAnalyzer {
                 ArchiveTreeStructure.updateDownloadFileSizes(node, ApkSizeCalculator.getDefault());
             }
             ArchiveTreeStream.preOrderStream(node)
-                    .map(
-                            n -> {
-                                String path = n.getData().getFullPathString();
-                                long rawSize = n.getData().getRawFileSize();
-                                long downloadSize = n.getData().getDownloadFileSize();
-
-                                if (showDownloadSize) {
-                                    path = getSize(downloadSize) + "\t" + path;
-                                }
-                                if (showRawSize) {
-                                    path = getSize(rawSize) + "\t" + path;
-                                }
-                                return path;
-                            })
-                    .filter(path -> !showFilesOnly || !path.endsWith("/"))
+                    .map(ArchiveNode::getData)
                     .forEachOrdered(emitter::onNext);
             emitter.onComplete();
         });
