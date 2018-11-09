@@ -153,6 +153,18 @@ public class ApkAnalyzer {
         }
     }
 
+    public static int getResId(int packId, int resTypeId, int entryid) {
+        return (((packId) << 24) | (((resTypeId) & 0xFF) << 16) | (entryid & 0xFFFF));
+    }
+
+    public static void main(String[] args) {
+        Path APK_PATH = new File("assets/app-test.apk").toPath();
+
+        ApkAnalyzer apkAnalyzer = new ApkAnalyzer("/Users/didi/Library/Android/sdk", APK_PATH);
+        apkAnalyzer.resId("string", "default", "abc_capital_on", null).subscribe(System.out::println);
+        apkAnalyzer.resValue("string", "default", "abc_capital_on", null).subscribe(System.out::println);
+    }
+
     public Observable<String> resPackages() {
         return Observable.create(emitter -> {
 
@@ -306,6 +318,62 @@ public class ApkAnalyzer {
                                 throw new IllegalArgumentException(
                                         "Can't find specified resource value");
                             }
+                        }
+                    }
+                    emitter.onComplete();
+                    return;
+                }
+            }
+            throw new IllegalArgumentException(
+                    String.format("Can't find specified resource configuration (%s)", config));
+        });
+    }
+
+    public Observable<String> resId(
+            @NonNull String type,
+            @NonNull String config,
+            @NonNull String name,
+            @Nullable String packageName) {
+        return Observable.create(emitter -> {
+            byte[] resContents =
+                    Files.readAllBytes(archive.getContentRoot().resolve("resources.arsc"));
+            BinaryResourceFile binaryRes = new BinaryResourceFile(resContents);
+            List<Chunk> chunks = binaryRes.getChunks();
+            if (chunks.isEmpty()) {
+                throw new IOException("no chunks");
+            }
+
+            if (!(chunks.get(0) instanceof ResourceTableChunk)) {
+                throw new IOException("no res table chunk");
+            }
+
+            ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
+            StringPoolChunk stringPoolChunk = resourceTableChunk.getStringPool();
+            Optional<PackageChunk> packageChunk;
+            if (packageName != null) {
+                packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
+            } else {
+                packageChunk = resourceTableChunk.getPackages().stream().findFirst();
+            }
+            if (!packageChunk.isPresent()) {
+                throw new IllegalArgumentException(
+                        String.format(
+                                "Can't find package chunk %s",
+                                packageName == null ? "" : "(" + packageName + ")"));
+            }
+            int packageId = packageChunk.get().getId();
+
+            TypeSpecChunk typeSpecChunk = packageChunk.get().getTypeSpecChunk(type);
+            int resTypeId = typeSpecChunk.getId();
+            List<TypeChunk> typeChunks =
+                    ImmutableList.copyOf(packageChunk.get().getTypeChunks(typeSpecChunk.getId()));
+            for (TypeChunk typeChunk : typeChunks) {
+                if (config.equals(typeChunk.getConfiguration().toString())) {
+                    for (Map.Entry<Integer, TypeChunk.Entry> entry : typeChunk.getEntries().entrySet()) {
+                        if (name.equals(entry.getValue().key())) {
+                            int entryId = entry.getKey();
+                            int resId = getResId(packageId, resTypeId, entryId);
+                            emitter.onNext("0x" + Integer.toHexString(resId));
                         }
                     }
                     emitter.onComplete();
@@ -840,8 +908,6 @@ public class ApkAnalyzer {
                     .forEachOrdered(emitter::onNext);
             emitter.onComplete();
         });
-
-
     }
 
     private String getSize(long bytes) {
