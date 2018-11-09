@@ -19,9 +19,8 @@ public class TestApkAnalyzer {
     private Path path2 = new File("assets/demo2.apk").toPath();
 
     @Before
-    public void setup() {
-        String sdk = System.getenv("ANDROID_HOME");
-        apkAnalyzer = new ApkAnalyzer(sdk, path);
+    public void setup() throws IOException {
+        apkAnalyzer = new ApkAnalyzer(path);
         apkAnalyzer.setHumanReadableFlag(true);
     }
 
@@ -85,7 +84,6 @@ public class TestApkAnalyzer {
     public void testDexReferences() {
         List<String> dexFileList = new ArrayList<>();
         dexFileList.add("classes.dex");
-        // dex file method references count
         apkAnalyzer.dexReferences(dexFileList)
                 .subscribe(s -> Assert.assertEquals("54951", s.toString()));
     }

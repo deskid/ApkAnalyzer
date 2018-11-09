@@ -57,7 +57,7 @@ import java.util.stream.Stream;
  */
 public class ApkAnalyzer {
 
-    private static final String TOOLSDIR = "com.android.sdklib.toolsdir";
+    private static final String ANDROID_HOME_SDK = "ANDROID_HOME";
 
     @NonNull
     private final AaptInvoker aaptInvoker;
@@ -66,45 +66,27 @@ public class ApkAnalyzer {
 
     private Archive archive;
 
-    public ApkAnalyzer(@Nullable String osSdkFolder, Path apk) {
-        this.aaptInvoker = getAaptInvokerFromSdk(osSdkFolder);
-        try {
-            archive = Archives.open(apk);
-            apkPath = apk;
-        } catch (IOException e) {
-            e.printStackTrace();
+    public ApkAnalyzer(Path apk) throws IOException {
+        this(apk, null);
+    }
+
+    public ApkAnalyzer(Path apk, @Nullable String osSdkFolder) throws IOException {
+        this.aaptInvoker = getAaptInvokerFromSdk(null);
+        archive = Archives.open(apk);
+        apkPath = apk;
+    }
+
+    private static String getAndroidSdkFolder() {
+        String sdkFolder = System.getenv(ANDROID_HOME_SDK);
+        if (sdkFolder == null) {
+            throw new RuntimeException("android sdk not set \"export ANDROID_HOME=$HOME/Library/Android/sdk\"");
         }
+        return sdkFolder;
     }
 
     private static AaptInvoker getAaptInvokerFromSdk(@Nullable String osSdkFolder) {
         if (osSdkFolder == null) {
-            // We get passed a property for the tools dir
-            String toolsDirProp = System.getProperty(TOOLSDIR);
-            if (toolsDirProp == null) {
-                // for debugging, it's easier to override using the process environment
-                toolsDirProp = System.getenv(TOOLSDIR);
-            }
-
-            if (toolsDirProp != null) {
-                // got back a level for the SDK folder
-                File tools;
-                if (!toolsDirProp.isEmpty()) {
-                    try {
-                        tools = new File(toolsDirProp).getCanonicalFile();
-                        osSdkFolder = tools.getParent();
-                    } catch (IOException e) {
-                        // try using "." below
-                    }
-                }
-                if (osSdkFolder == null) {
-                    try {
-                        tools = new File(".").getCanonicalFile();
-                        osSdkFolder = tools.getParent();
-                    } catch (IOException e) {
-                        // Will print an error below since mSdkFolder is not defined
-                    }
-                }
-            }
+            osSdkFolder = getAndroidSdkFolder();
         }
         AndroidSdkHandler sdkHandler = AndroidSdkHandler.getInstance(new File(osSdkFolder));
         return new AaptInvoker(sdkHandler, new NullLogger());
@@ -155,16 +137,6 @@ public class ApkAnalyzer {
         return (((packId) << 24) | (((resTypeId) & 0xFF) << 16) | (entryId & 0xFFFF));
     }
 
-    public static void main(String[] args) {
-        Path APK_PATH = new File("assets/demo.apk").toPath();
-
-        ApkAnalyzer apkAnalyzer = new ApkAnalyzer("/Users/didi/Library/Android/sdk", APK_PATH);
-        apkAnalyzer.resNames("string", "default", null).subscribe(System.out::println);
-        String resName = "abc_capital_on";
-        apkAnalyzer.resId("string", "default", resName, null).subscribe(System.out::println);
-        apkAnalyzer.resValue("string", "default", resName, null).subscribe(System.out::println);
-    }
-
     /**
      * close the archive
      *
@@ -174,6 +146,11 @@ public class ApkAnalyzer {
         archive.close();
     }
 
+    /**
+     * get packages name
+     *
+     * @return Observable
+     */
     public Observable<String> resPackages() {
         return Observable.create(emitter -> {
 
@@ -198,6 +175,13 @@ public class ApkAnalyzer {
         });
     }
 
+    /**
+     * get binary xml file content
+     *
+     * @param filePath xml file path
+     * @return String
+     * @throws IOException The supplied file is not a binary XML resource.
+     */
     public String resXml(@NonNull String filePath) throws IOException {
         Path path = archive.getContentRoot().resolve(filePath);
         byte[] bytes = Files.readAllBytes(path);
@@ -207,6 +191,14 @@ public class ApkAnalyzer {
         return new String(BinaryXmlParser.decodeXml(path.getFileName().toString(), bytes));
     }
 
+    /**
+     * get all resource name of the specified resource type and resource config
+     *
+     * @param type        [string/dimen/color/...]
+     * @param config      [default/v22/v26/en/zh-rCN/hdpi/...]
+     * @param packageName [null to find first package or find the specified the package name]
+     * @return Observable
+     */
     public Observable<String> resNames(
             @NonNull String type,
             @NonNull String config,
@@ -255,10 +247,17 @@ public class ApkAnalyzer {
             throw new IllegalArgumentException(
                     String.format("Can't find specified resource configuration (%s)", config));
         });
-
-
     }
 
+    /**
+     * get resource value of the specified resource name
+     *
+     * @param type        [string/dimen/color/...]
+     * @param config      [default/v22/v26/en/zh-rCN/hdpi/...]
+     * @param name        the resource name
+     * @param packageName [null to find first package or find the specified the package name]
+     * @return Observable
+     */
     public Observable<String> resValue(
             @NonNull String type,
             @NonNull String config,
@@ -331,6 +330,15 @@ public class ApkAnalyzer {
         });
     }
 
+    /**
+     * get resource ID of the specified resource name
+     *
+     * @param type        [string/dimen/color/...]
+     * @param config      [default/v22/v26/en/zh-rCN/hdpi/...]
+     * @param name        the resource name
+     * @param packageName [null to find first package or find the specified the package name]
+     * @return Observable
+     */
     public Observable<String> resId(
             @NonNull String type,
             @NonNull String config,
@@ -350,7 +358,6 @@ public class ApkAnalyzer {
             }
 
             ResourceTableChunk resourceTableChunk = (ResourceTableChunk) chunks.get(0);
-            StringPoolChunk stringPoolChunk = resourceTableChunk.getStringPool();
             Optional<PackageChunk> packageChunk;
             if (packageName != null) {
                 packageChunk = Optional.ofNullable(resourceTableChunk.getPackage(packageName));
@@ -387,6 +394,13 @@ public class ApkAnalyzer {
         });
     }
 
+    /**
+     * get all resource configs of the specified resource type
+     *
+     * @param type        [string/dimen/color/...]
+     * @param packageName [null to find first package or find the specified the package name]
+     * @return Observable
+     */
     public Observable<String> resConfigs(@NonNull String type, @Nullable String packageName) {
         return Observable.create(emitter -> {
 
@@ -426,6 +440,13 @@ public class ApkAnalyzer {
         });
     }
 
+    /**
+     * get dex code of the specified class and method
+     *
+     * @param fqcn   full qualified class name e.g. "android.app.ContextImpl"
+     * @param method method name e.g. "onStart()V"
+     * @return Observable
+     */
     public Observable<String> dexCode(@NonNull String fqcn, @Nullable final String method) {
         return Observable.create(emitter -> {
             String newMethod = method;
@@ -475,6 +496,12 @@ public class ApkAnalyzer {
         });
     }
 
+    /**
+     * get dex file method references count of the specified dex file paths
+     *
+     * @param dexFilePaths e.g. ["classes.dex"]
+     * @return Observable
+     */
     public Observable<Integer> dexReferences(@Nullable List<String> dexFilePaths) {
         return Observable.create(emitter -> {
             Collection<Path> dexPaths;
@@ -494,13 +521,15 @@ public class ApkAnalyzer {
                 emitter.onComplete();
             }
         });
-
-
     }
 
+    /**
+     * get dex file list
+     *
+     * @return Observable
+     */
     public Observable<String> dexList() {
         return Observable.create(emitter -> {
-
             getDexFilesFrom(archive.getContentRoot()).stream()
                     .map(path -> path.getFileName().toString())
                     .forEachOrdered(emitter::onNext);
@@ -519,6 +548,11 @@ public class ApkAnalyzer {
         return AndroidManifestParser.parse(new ByteArrayInputStream(manifestBytes));
     }
 
+    /**
+     * get manifest debuggable
+     *
+     * @return boolean
+     */
     public boolean manifestDebuggable() {
         try {
             ManifestData manifestData = getManifestData(archive);
@@ -530,6 +564,11 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get manifest permissions
+     *
+     * @return Observable
+     */
     public Observable<String> manifestPermissions() {
         return Observable.create(emitter -> {
             List<String> output;
@@ -544,9 +583,13 @@ public class ApkAnalyzer {
             }
             emitter.onComplete();
         });
-
     }
 
+    /**
+     * get manifest targetSdk
+     *
+     * @return String
+     */
     public String manifestTargetSdk() {
         try {
             ManifestData manifestData = getManifestData(archive);
@@ -558,6 +601,11 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get manifest minSdk
+     *
+     * @return String
+     */
     public String manifestMinSdk() {
         try {
             ManifestData manifestData = getManifestData(archive);
@@ -572,6 +620,11 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get manifest version code
+     *
+     * @return String
+     */
     public String manifestVersionCode() {
         try {
             ManifestData manifestData = getManifestData(archive);
@@ -583,6 +636,11 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get manifest version name
+     *
+     * @return String
+     */
     public String manifestVersionName() {
         List<String> xml;
         try {
@@ -594,6 +652,11 @@ public class ApkAnalyzer {
         return apkInfo.versionName;
     }
 
+    /**
+     * get manifest app id
+     *
+     * @return String
+     */
     public String manifestAppId() {
         try {
             ManifestData manifestData = getManifestData(archive);
@@ -605,6 +668,11 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get AndroidManifest.xml content
+     *
+     * @return String
+     */
     public String manifestPrint() {
         try {
             Path path = archive.getContentRoot().resolve(SdkConstants.ANDROID_MANIFEST_XML);
@@ -615,16 +683,37 @@ public class ApkAnalyzer {
         }
     }
 
+    /**
+     * get apk download size
+     *
+     * @return String
+     * @see #setHumanReadableFlag(boolean)
+     */
     public String apkDownloadSize() {
         ApkSizeCalculator sizeCalculator = ApkSizeCalculator.getDefault();
         return getSize(sizeCalculator.getFullApkDownloadSize(apkPath));
     }
 
+    /**
+     * get apk raw size
+     *
+     * @return String
+     * @see #setHumanReadableFlag(boolean)
+     */
     public String apkRawSize() {
         ApkSizeCalculator sizeCalculator = ApkSizeCalculator.getDefault();
         return getSize(sizeCalculator.getFullApkRawSize(apkPath));
     }
 
+    /**
+     * compare two apk and return the entry diff on size
+     *
+     * @param newApkFile        the new apk
+     * @param patchSize         should compute size diff
+     * @param showFilesOnly     only show files entry
+     * @param showDifferentOnly only show different entry
+     * @return Observable ApkDiffEntry
+     */
     public Observable<ApkDiffEntry> apkCompare(
             @NonNull Path newApkFile,
             boolean patchSize,
@@ -646,8 +735,6 @@ public class ApkAnalyzer {
                 throw new RuntimeException(e);
             }
         });
-
-
     }
 
     private void dumpCompare(
@@ -678,7 +765,11 @@ public class ApkAnalyzer {
         }
     }
 
-
+    /**
+     * get apk summary info : packageId/versionCode/versionName/usesFeature/permissions
+     *
+     * @return AndroidApplicationInfo
+     */
     public AndroidApplicationInfo apkSummary() {
         List<String> output;
         try {
@@ -690,6 +781,11 @@ public class ApkAnalyzer {
         return apkInfo;
     }
 
+    /**
+     * get apk file entries path/size info list
+     *
+     * @return Observable
+     */
     public Observable<ArchiveEntry> filesList(
             boolean showRawSize,
             boolean showDownloadSize) {
@@ -714,6 +810,11 @@ public class ApkAnalyzer {
         return humanReadableFlag ? getHumanizedSize(bytes) : String.valueOf(bytes);
     }
 
+    /**
+     * set size humanReadable
+     *
+     * @param humanReadableFlag
+     */
     public void setHumanReadableFlag(boolean humanReadableFlag) {
         this.humanReadableFlag = humanReadableFlag;
     }
