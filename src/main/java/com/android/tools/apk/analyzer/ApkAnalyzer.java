@@ -66,9 +66,6 @@ public class ApkAnalyzer {
 
     private Archive archive;
 
-    /**
-     * Constructs a new command-line processor.
-     */
     public ApkAnalyzer(@Nullable String osSdkFolder, Path apk) {
         this.aaptInvoker = getAaptInvokerFromSdk(osSdkFolder);
         try {
@@ -158,11 +155,17 @@ public class ApkAnalyzer {
     }
 
     public static void main(String[] args) {
-        Path APK_PATH = new File("assets/app-test.apk").toPath();
+        Path APK_PATH = new File("assets/demo.apk").toPath();
 
         ApkAnalyzer apkAnalyzer = new ApkAnalyzer("/Users/didi/Library/Android/sdk", APK_PATH);
-        apkAnalyzer.resId("string", "default", "abc_capital_on", null).subscribe(System.out::println);
-        apkAnalyzer.resValue("string", "default", "abc_capital_on", null).subscribe(System.out::println);
+        apkAnalyzer.resNames("string", "default", null).subscribe(System.out::println);
+        String resName = "abc_capital_on";
+        apkAnalyzer.resId("string", "default", resName, null).subscribe(System.out::println);
+        apkAnalyzer.resValue("string", "default", resName, null).subscribe(System.out::println);
+    }
+
+    public void close() throws IOException {
+        archive.close();
     }
 
     public Observable<String> resPackages() {
@@ -187,8 +190,6 @@ public class ApkAnalyzer {
 
             emitter.onComplete();
         });
-
-
     }
 
     public Observable<byte[]> resXml(@NonNull String filePath) {
